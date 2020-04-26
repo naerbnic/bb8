@@ -198,6 +198,8 @@ pub struct Builder<M: ManageConnection> {
     idle_timeout: Option<Duration>,
     /// The duration to wait to start a connection before giving up.
     connection_timeout: Duration,
+    /// The connection customizer
+    customizer: Box<dyn CustomizeConnection<M::Connection, M::Error>>,
     /// The error sink.
     error_sink: Box<dyn ErrorSink<M::Error>>,
     /// The time interval used to wake up and reap connections.
@@ -214,6 +216,7 @@ impl<M: ManageConnection> Default for Builder<M> {
             max_lifetime: Some(Duration::from_secs(30 * 60)),
             idle_timeout: Some(Duration::from_secs(10 * 60)),
             connection_timeout: Duration::from_secs(30),
+            customizer: Box::new(NopCustomizeConnection),
             error_sink: Box::new(NopErrorSink),
             reaper_rate: Duration::from_secs(30),
             _p: PhantomData,
@@ -303,6 +306,12 @@ impl<M: ManageConnection> Builder<M> {
             "connection_timeout must be non-zero"
         );
         self.connection_timeout = connection_timeout;
+        self
+    }
+
+    /// TODO
+    pub fn connection_customizer(mut self, connection_customizer: Box<dyn CustomizeConnection<M::Connection, M::Error>>) -> Builder<M> {
+        self.customizer = connection_customizer;
         self
     }
 
@@ -478,7 +487,8 @@ where
     let mut delay = Duration::from_secs(0);
     loop {
         match shared.manager.connect().await {
-            Ok(conn) => {
+            Ok(mut conn) => {
+                pool.statics.customizer.on_acquire(&mut conn).await?;
                 let now = Instant::now();
                 let conn = IdleConn {
                     conn: Conn { conn, birth: now },
@@ -812,4 +822,32 @@ where
                 .await;
         })
     }
+}
+
+/// A trait which allows for customization of connections
+///
+/// This trait was defined with `async_trait`, and should be implemented using it as well.
+#[async_trait]
+pub trait CustomizeConnection<C, E>: std::fmt::Debug + Send + Sync + 'static
+where
+    C: Send + 'static,
+    E: Send + 'static,
+{
+    /// Called with connections immediately after they are returned from `ManageConnection::connect`.
+    ///
+    /// The default implementation simply returns `Ok(())`
+    async fn on_acquire(&self, _conn: &mut C) -> Result<(), E> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct NopCustomizeConnection;
+
+#[async_trait]
+impl<C, E> CustomizeConnection<C, E> for NopCustomizeConnection
+where
+    C: Send + 'static,
+    E: Send + 'static,
+{
 }
